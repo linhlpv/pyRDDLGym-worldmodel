@@ -54,10 +54,10 @@ DEFAULT_DECODER_TYPE = {
 }
 
 DEFAULT_LOSS_FN = {
-    'pixel': nn.BCEWithLogitsLoss(),
-    'real': nn.HuberLoss(),
-    'int': nn.CrossEntropyLoss(),
-    'bool': nn.CrossEntropyLoss(),
+    'pixel': nn.BCEWithLogitsLoss,
+    'real': nn.HuberLoss,
+    'int': nn.CrossEntropyLoss,
+    'bool': nn.CrossEntropyLoss,
 }
 
 
@@ -150,7 +150,7 @@ class WorldModel(nn.Module):
             prange = spec.prange
             encoder_type = DEFAULT_ENCODER_TYPE.get(prange, VectorEncoder)
             decoder_type = DEFAULT_DECODER_TYPE.get(prange, VectorDecoder)
-            loss_fn = DEFAULT_LOSS_FN.get(prange, nn.HuberLoss())
+            loss_fn = DEFAULT_LOSS_FN.get(prange, nn.HuberLoss)()
 
             # use CNN layers for pixels, with binary cross-entropy loss, MLP for real
             if prange in ('pixel', 'real'):
