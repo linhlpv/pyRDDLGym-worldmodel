@@ -373,11 +373,14 @@ class WorldModel(nn.Module):
 
         return loss
 
-    @staticmethod
-    def dict_to_device(values: TensorDict, device: torch.device) -> TensorDict:
-        '''Moves a dictionary of tensors to the same device and dtype as the model.'''
-        return {k: v.to(device) for k, v in values.items()}
-        
+    def batch_loss(self, batch_data: Any, device: torch.device) -> Tensor:
+        '''Computes the loss for a batch of data, moving tensors to the correct device.'''
+        states = {k: v.to(device) for k, v in batch_data['states'].items()}
+        actions = {k: v.to(device) for k, v in batch_data['actions'].items()}
+        next_states = {k: v.to(device) for k, v in batch_data['next_states'].items()}
+        pad_lens = batch_data['pad'].to(device)
+        return self.loss(states, actions, next_states, pad_lens)
+
     @torch.no_grad()
     def evaluate(self, data_loader) -> float:
         '''Evaluates the model on a test dataset and returns the average loss.'''
@@ -389,11 +392,7 @@ class WorldModel(nn.Module):
 
         loss = 0.
         for batch_data in tqdm(data_loader, desc='Evaluating'):
-            states = self.dict_to_device(batch_data['states'], device)
-            actions = self.dict_to_device(batch_data['actions'], device)
-            next_states = self.dict_to_device(batch_data['next_states'], device)
-            pad_lens = batch_data['pad'].to(device)
-            loss += self.loss(states, actions, next_states, pad_lens).item()
+            loss += self.batch_loss(batch_data, device).item()
         return loss / len(data_loader)
 
     def fit(self, train_data_loader, epochs: int, 
@@ -417,12 +416,7 @@ class WorldModel(nn.Module):
             # training loop
             epoch_loss = 0.
             for batch_data in tqdm(train_data_loader, desc=f'Epoch {epoch+1}/{epochs}'):
-                states = self.dict_to_device(batch_data['states'], device)
-                actions = self.dict_to_device(batch_data['actions'], device)
-                next_states = self.dict_to_device(batch_data['next_states'], device)
-                pad_lens = batch_data['pad'].to(device)
-                loss = self.loss(states, actions, next_states, pad_lens)
-
+                loss = self.batch_loss(batch_data, device)
                 optim.zero_grad()
                 loss.backward()
                 optim.step()
