@@ -57,35 +57,6 @@ class VectorDecoder(nn.Module):
         return dec
 
 
-class GaussianBottleneck(nn.Module):
-    '''Stochastic bottleneck z' ~ N(mu(z), sigma(z)) applied to transformer outputs.'''
-
-    def __init__(self, d_model: int, d_hidden: int | None=None,
-                 logvar_bounds: Tuple[float, float]=(-10., 10.)) -> None:
-        super().__init__()
-        
-        self.logvar_bounds = logvar_bounds
-        if d_hidden is None:
-            d_hidden = d_model
-
-        # simple MLP to project (d_model,) embedding into mean and logvar of Gaussian
-        self.hidden = nn.Sequential(
-            nn.Linear(d_model, d_hidden), 
-            nn.GELU()
-        )
-        self.mu_head = nn.Linear(d_hidden, d_model)
-        self.logvar_head = nn.Linear(d_hidden, d_model)
-        self._kl = torch.tensor(0.)
-
-    def forward(self, x: Tensor) -> Tensor:
-        h = self.hidden(x)
-        mu = self.mu_head(h)
-        logvar = self.logvar_head(h).clamp(*self.logvar_bounds)
-        z = mu + (0.5 * logvar).exp() * torch.randn_like(mu)
-        self._kl = -0.5 * (1.0 + logvar - mu.pow(2) - logvar.exp()).sum(-1).mean()
-        return z
-
-
 # <------------------------------- Image In and Out  ------------------------------>
 
 class ImageEncoder(nn.Module):
