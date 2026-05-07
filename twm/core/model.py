@@ -7,7 +7,9 @@ from tqdm import tqdm
 from typing import Any, Dict, Optional, Tuple
 
 from twm.core.encoding import SinePositionalEncoding, RotaryTransformerEncoderLayer
-from twm.core.projection import VectorEncoder, VectorDecoder, ImageEncoder, ImageDecoder
+from twm.core.projection import (
+    VectorEncoder, VectorDecoder, GaussianBottleneck, ImageEncoder, ImageDecoder
+)
 from twm.core.spec import EnvSpec
 
 Array = np.ndarray
@@ -68,7 +70,8 @@ class WorldModel(nn.Module):
     def __init__(self, env_spec: EnvSpec,  
                  seq_len: int, d_model: int=64, nhead: int=4, num_layers: int=4, 
                  dim_feedforward: int=256, dropout: float=0.1, norm_first: bool=True, 
-                 use_absolute_pe: bool=True, use_rope: bool=True) -> None:
+                 use_absolute_pe: bool=True, use_rope: bool=True,
+                 use_stochastic_latent: bool=False, vae_kl_weight: float=0.001) -> None:
         super().__init__()
 
         self.env_spec = env_spec
@@ -82,9 +85,13 @@ class WorldModel(nn.Module):
         self.norm_first = norm_first
         self.use_absolute_pe = use_absolute_pe
         self.use_rope = use_rope
+        self.use_stochastic_latent = use_stochastic_latent
+        self.vae_kl_weight = vae_kl_weight
         
         # (state, action) -> (d_model,) embedding -> next state prediction
         self._create_encoders_and_decoders_from_spec()
+        if use_stochastic_latent:
+            self.bottleneck = GaussianBottleneck(d_model)
         self.input_proj = nn.Linear(len(self.encoders) * d_model, d_model)
         self.input_norm = nn.LayerNorm(d_model)
 
@@ -289,12 +296,17 @@ class WorldModel(nn.Module):
         return latents
 
     def select_condition(self, latents: Tensor, pad_lens: Tensor) -> TensorDict:
-        '''Selects the appropriate latent from the transformer to feed to the decoder.'''
+        '''Selects the appropriate latent from the transformer to feed to the decoder.
+        Also processes the latent with stochastic bottleneck if enabled.'''
         # select the latents corresponding to the last real tokens
         batch, seq_len = latents.shape[:2]
         last_real_idx = (seq_len - pad_lens - 1).clamp(min=0)
         batch_idx = torch.arange(batch, device=latents.device)
         last_latent = latents[batch_idx, last_real_idx]
+
+        # optionally pass through stochastic bottleneck
+        if self.use_stochastic_latent:
+            last_latent = self.bottleneck(last_latent)
 
         # choose latents depending on the decoder's conditioning mode
         result_latents = {}
@@ -334,7 +346,7 @@ class WorldModel(nn.Module):
                 if grad:
                     result[key] = F.softmax(tensor.float(), dim=-1)
                 else:
-                    if stochastic:
+                    if stochastic: 
                         probs = F.softmax(tensor.float() / temperature, dim=-1)
                         flat_probs = probs.reshape(-1, probs.shape[-1])
                         idx = torch.multinomial(flat_probs, num_samples=1).squeeze(-1)
@@ -397,7 +409,11 @@ class WorldModel(nn.Module):
             if self.all_spec[key].prange in ('int', 'bool'):  # for cross-entropy
                 pred = pred.movedim(-1, 1)
                 target = target.movedim(-1, 1)
-            loss += self.loss_fns[key](pred, target)
+            loss = loss + self.loss_fns[key](pred, target)
+
+        # add KL term once for the shared bottleneck (ELBO = reconstruction + KL)
+        if self.use_stochastic_latent:
+            loss = loss + self.vae_kl_weight * self.bottleneck._kl
         return loss
 
     @staticmethod
@@ -487,6 +503,8 @@ class WorldModel(nn.Module):
             'norm_first': self.norm_first,
             'use_absolute_pe': self.use_absolute_pe,
             'use_rope': self.use_rope,
+            'use_stochastic_latent': self.use_stochastic_latent,
+            'vae_kl_weight': self.vae_kl_weight,
         }
 
     def save(self, model_name: str) -> None:
