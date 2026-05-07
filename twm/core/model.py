@@ -4,10 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, cast, Dict, Optional, Tuple
 
 from twm.core.encoding import SinePositionalEncoding, RotaryTransformerEncoderLayer
-from twm.core.projection import VectorEncoder, VectorDecoder, ImageEncoder, ImageDecoder
+from twm.core.projection import (
+    VectorEncoder, VectorDecoder, CategoricalDecoder, ImageEncoder, ImageDecoder
+)
 from twm.core.spec import EnvSpec
 
 Array = np.ndarray
@@ -49,15 +51,8 @@ DEFAULT_ENCODER_TYPE = {
 DEFAULT_DECODER_TYPE = {
     'pixel': ImageDecoder,
     'real': VectorDecoder,
-    'int': VectorDecoder,
-    'bool': VectorDecoder,
-}
-
-DEFAULT_LOSS_FN = {
-    'pixel': nn.BCEWithLogitsLoss,
-    'real': nn.HuberLoss,
-    'int': nn.CrossEntropyLoss,
-    'bool': nn.CrossEntropyLoss,
+    'int': CategoricalDecoder,
+    'bool': CategoricalDecoder,
 }
 
 
@@ -83,7 +78,7 @@ class WorldModel(nn.Module):
         self.use_absolute_pe = use_absolute_pe
         self.use_rope = use_rope
         
-        # (state, action) -> (d_model,) embedding -> next state prediction
+        # (state, action) -> (d_model,) embedding
         self._create_encoders_and_decoders_from_spec()
         self.input_proj = nn.Linear(len(self.encoders) * d_model, d_model)
         self.input_norm = nn.LayerNorm(d_model)
@@ -144,30 +139,26 @@ class WorldModel(nn.Module):
         d_model = self.d_model
         self.encoders = nn.ModuleDict()
         self.decoders = nn.ModuleDict()
-        self.loss_fns = nn.ModuleDict()
 
         for key, spec in self.all_spec.items():
             prange = spec.prange
             encoder_type = DEFAULT_ENCODER_TYPE.get(prange, VectorEncoder)
             decoder_type = DEFAULT_DECODER_TYPE.get(prange, VectorDecoder)
-            loss_fn = DEFAULT_LOSS_FN.get(prange, nn.HuberLoss)()
 
             # use CNN layers for pixels, with binary cross-entropy loss, MLP for real
             if prange in ('pixel', 'real'):
                 self.encoders[key] = encoder_type(spec.shape, d_model)
                 if key in self.env_spec.state_spec:
                     self.decoders[key] = decoder_type(spec.shape, d_model)
-                    self.loss_fns[key] = loss_fn
             
             # use one-hot encoding and cross entropy for discrete actions
             elif prange in ('int', 'bool'):
                 low, high = self.spec_bounds(key)
                 n_classes = high - low + 1
-                new_shape = (*spec.shape, n_classes)
-                self.encoders[key] = encoder_type(new_shape, d_model)
+                shape = (*spec.shape, n_classes)
+                self.encoders[key] = encoder_type(shape, d_model)
                 if key in self.env_spec.state_spec:
-                    self.decoders[key] = decoder_type(new_shape, d_model)
-                    self.loss_fns[key] = loss_fn
+                    self.decoders[key] = decoder_type(shape, d_model, low=low, high=high)
 
             else:
                 raise ValueError(f'Unknown prange for key {key}: {prange}')
@@ -289,7 +280,8 @@ class WorldModel(nn.Module):
         return latents
 
     def select_condition(self, latents: Tensor, pad_lens: Tensor) -> TensorDict:
-        '''Selects the appropriate latent from the transformer to feed to the decoder.'''
+        '''Selects the appropriate latent from the transformer to feed to the decoder.
+        Also processes the latent with stochastic bottleneck if enabled.'''
         # select the latents corresponding to the last real tokens
         batch, seq_len = latents.shape[:2]
         last_real_idx = (seq_len - pad_lens - 1).clamp(min=0)
@@ -307,46 +299,26 @@ class WorldModel(nn.Module):
                 raise ValueError(f'Invalid condition mode: {decoder.condition_mode}')
         return result_latents
 
-    def prepare_outputs(self, inputs: TensorDict, grad: bool=False, 
-                        stochastic: bool=False, temperature: float=1.0) -> TensorDict:
-        '''Prepares outputs using the dataset statistics.'''
-        if temperature <= 0:
-            raise ValueError('temperature must be > 0.')
-
+    def prepare_outputs(self, inputs: TensorDict, **kwargs) -> TensorDict:
+        '''Prepares outputs using decoder-owned logic and dataset statistics for reals.'''
         result = {}
         for key, tensor in inputs.items():
-            spec = self.all_spec[key]
 
-            # pixel values fed directly
-            if spec.prange == 'pixel':
-                result[key] = torch.sigmoid(tensor).float()
+            # decoder decides output behavior for each type
+            decode_fn = self.decoders[key].decode_output
+            if not callable(decode_fn):
+                raise TypeError('Decoder must implement decode_output.')
+            value = cast(Tensor, decode_fn(tensor, **kwargs))
 
-            # real outputs rescaled back to original range
-            elif spec.prange == 'real':
+            # model handles denormalization for real-valued states
+            if self.all_spec[key].prange == 'real':
                 mean = getattr(self, f'{key}_mean')
                 std = getattr(self, f'{key}_std')
-                mean = mean.view(*(1,) * (tensor.ndim - mean.ndim), *mean.shape)
-                std = std.view(*(1,) * (tensor.ndim - std.ndim), *std.shape)
-                result[key] = tensor.float() * std + mean
-            
-            # discrete outputs converted from one-hot vectors back to integer values
-            elif spec.prange in ('int', 'bool'):
-                if grad:
-                    result[key] = F.softmax(tensor.float(), dim=-1)
-                else:
-                    if stochastic:
-                        probs = F.softmax(tensor.float() / temperature, dim=-1)
-                        flat_probs = probs.reshape(-1, probs.shape[-1])
-                        idx = torch.multinomial(flat_probs, num_samples=1).squeeze(-1)
-                        idx = idx.view(*probs.shape[:-1])
-                    else:
-                        idx = tensor.argmax(dim=-1)
-                    low, high = self.spec_bounds(key)
-                    assert idx.max() < (high - low + 1)
-                    result[key] = idx + low
-            
-            else:
-                raise ValueError(f'Unknown prange for key {key}: {spec.prange}')
+                mean = mean.view(*(1,) * (value.ndim - mean.ndim), *mean.shape)
+                std = std.view(*(1,) * (value.ndim - std.ndim), *std.shape)
+                value = value.float() * std + mean
+
+            result[key] = value
 
         return result
     
@@ -390,14 +362,15 @@ class WorldModel(nn.Module):
         # predict next states from the model
         preds = self.forward(states, actions, pad_lens, decode_output=False)
 
-        # compute loss across all state keys and sum
+        # reconstruction term across all state keys
         loss = torch.tensor(0., device=pad_lens.device)
         for key in targets:
             pred, target = preds[key], targets[key]
-            if self.all_spec[key].prange in ('int', 'bool'):  # for cross-entropy
-                pred = pred.movedim(-1, 1)
-                target = target.movedim(-1, 1)
-            loss += self.loss_fns[key](pred, target)
+            loss_fn = self.decoders[key].compute_loss
+            if not callable(loss_fn):
+                raise TypeError('Decoder must implement compute_loss.')
+            loss = loss + cast(Tensor, loss_fn(pred, target))
+
         return loss
 
     @staticmethod
