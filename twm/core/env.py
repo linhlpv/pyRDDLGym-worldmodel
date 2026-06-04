@@ -100,11 +100,11 @@ class WorldModelEnv(gym.Env):
 
     def step(self, action: ArrayDict) -> Tuple:
         '''Performs one step in the environment.'''
-        action_torch = {k: torch.as_tensor(v).to(self.device) for k, v in action.items()}
-        action_batched = {k: v[None] for k, v in action_torch.items()}
-        self.rollout.step(action_batched)
-        next_obs = self.rollout.last_states(to_numpy=False, squash=True)
-        reward = self.reward_fn(self.obs, action_torch, next_obs)
+        action_torch = {k: torch.as_tensor(v)[None].to(self.device) 
+                        for k, v in action.items()}
+        self.rollout.step(action_torch)
+        next_obs = self.rollout.last_states()
+        reward = float(self.reward_fn(self.obs, action_torch, next_obs).item())
         self.obs = next_obs
         self.step_num += 1
         trunc = self.step_num >= self.max_steps
