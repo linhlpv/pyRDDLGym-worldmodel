@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from twm.core.data import PLOTS_PATH
 from twm.core.env import WorldModelEnv
@@ -57,8 +57,18 @@ class PolicyRepresentation(nn.Module, ABC):
         wm = self.rollout_env.world_model
         for key, param in action_tensors.items():
             spec = wm.env_spec.action_spec[key]
+
+            # convert logits to probabilities over discrete actions
             if spec.prange in ('int', 'bool'):
+                low, high = wm.spec_bounds(key)
+                n_classes = high - low + 1
+                if param.shape[-1] != n_classes:
+                    raise ValueError(
+                        f'Discrete action {key} must have trailing class dim '
+                        f'{n_classes}, got shape {tuple(param.shape)}.')
                 result[key] = F.softmax(param, dim=-1)
+
+            # for real-valued actions, optionally apply sigmoid and rescale to bounds
             elif spec.prange == 'real':
                 if spec.values is not None:
                     low, high = spec.values
@@ -68,9 +78,38 @@ class PolicyRepresentation(nn.Module, ABC):
                         result[key] = param
                 else:
                     result[key] = param
+            
             else:
                 raise ValueError(
                     f'Unsupported action range for plan-by-backprop: {key} ({spec.prange}).')
+        return result
+
+    @staticmethod
+    def _encode_obs(obs: Dict[str, Any], wm: WorldModelEnv, device: torch.device,
+                    add_batch: bool = True) -> TensorDict:
+        '''Encode raw observation dict into tensor dict with discrete/continuous handling.'''
+        result = {}
+        for key, spec in wm.env_spec.state_spec.items():
+            value = torch.as_tensor(obs[key], device=device)
+
+            # convert discrete obs to one-hot encoding
+            if spec.prange in ('int', 'bool'):
+                low, high = wm.spec_bounds(key)
+                n_classes = high - low + 1
+                if value.dim() == len(spec.shape):
+                    value = F.one_hot(value.long() - low, n_classes)
+                elif value.shape[-1] != n_classes:
+                    raise ValueError(
+                        f'Discrete obs {key} must be labels or have trailing class dim '
+                        f'{n_classes}, got shape {tuple(value.shape)}.')
+
+            # add batch dim if needed (for policy input consistency)
+            expected_dim = len(spec.shape) + int(spec.prange in ('int', 'bool'))
+            if add_batch and value.dim() == expected_dim:
+                value = value.unsqueeze(0)
+            
+            # ensure tensor is float for policy input
+            result[key] = value.float()
         return result
 
 
@@ -118,12 +157,9 @@ class SLP(PolicyRepresentation):
 
     def action(self, obs: TensorDict, step: int) -> TensorDict:
         del obs
-        decoded_steps = self._decoded_steps
-        if decoded_steps is not None:
-            return decoded_steps[step]
-
-        decoded = self._decode_action_tensors(dict(self.plan_params))
-        return {key: tensor[:, step] for key, tensor in decoded.items()}
+        assert self._decoded_steps is not None, \
+            'begin_rollout must be called before action.'
+        return self._decoded_steps[step]
 
 
 class DRP(PolicyRepresentation):
@@ -194,28 +230,12 @@ class DRP(PolicyRepresentation):
             raise RuntimeError('Policy is not bound to rollout_env.')
         wm = self.rollout_env.world_model
 
+        # normalize obs shape so flattening always sees a leading batch dimension
+        encoded = self._encode_obs(obs, wm, self.rollout_env.device, add_batch=True)
         flats = []
         for key in self.state_keys:
-            spec = wm.env_spec.state_spec[key]
-            x = obs[key]
-            if x.dim() == len(spec.shape):
-                x = x.unsqueeze(0)
-
-            if spec.prange in ('int', 'bool'):
-                low, high = wm.spec_bounds(key)
-                n_classes = high - low + 1
-                if x.ndim == len(spec.shape):
-                    x = F.one_hot(x.long() - low, n_classes).float()
-                elif x.ndim == len(spec.shape) + 1 and x.shape[-1] == n_classes:
-                    x = x.float()
-                else:
-                    raise ValueError(
-                        f'Unexpected discrete observation shape for {key}: {tuple(x.shape)}')
-            else:
-                x = x.float()
-
+            x = encoded[key]
             flats.append(x.reshape(x.shape[0], -1))
-
         return torch.cat(flats, dim=-1)
 
     def action(self, obs: TensorDict, step: int) -> TensorDict:
@@ -244,7 +264,7 @@ class PlanByBackpropMPC:
     '''Model-predictive controller using gradient-based action optimization.''' 
 
     def __init__(self, rollout_env: WorldModelEnv, real_env: gym.Env,
-                 lookahead: int, opt_steps: int=30, lr: float=0.01,
+                 lookahead: int, opt_steps: int=20, lr: float=0.001,
                  policy: Optional[PolicyRepresentation]=None,
                  drp_warm_start: bool=True) -> None:
         self.rollout_env = rollout_env
@@ -253,7 +273,7 @@ class PlanByBackpropMPC:
         self.opt_steps = opt_steps
         self.lr = lr
         self.drp_warm_start = drp_warm_start
-        self.policy = policy if policy is not None else SLP()
+        self.policy = policy if policy is not None else DRP()
         self.policy = self.policy.to(self.rollout_env.device)
         self.policy.bind(self.rollout_env)
 
@@ -318,29 +338,9 @@ class PlanByBackpropMPC:
     def _latest_obs_tensor(self) -> TensorDict:
         '''Convert latest real-env observation into policy input tensor dict.'''
         wm = self.rollout_env.world_model
-        result = {}
         obs = self._obs_history[-1]
-
-        for key, spec in wm.env_spec.state_spec.items():
-            value = torch.as_tensor(np.asarray(obs[key]), device=self.rollout_env.device)
-            if value.dim() == len(spec.shape):
-                value = value.unsqueeze(0)
-
-            if spec.prange in ('int', 'bool'):
-                low, high = wm.spec_bounds(key)
-                n_classes = high - low + 1
-                if value.ndim == len(spec.shape):
-                    value = F.one_hot(value.long() - low, n_classes).float()
-                elif value.ndim == len(spec.shape) + 1 and value.shape[-1] == n_classes:
-                    value = value.float()
-                else:
-                    raise ValueError(
-                        f'Unexpected discrete observation shape for {key}: {tuple(value.shape)}')
-            else:
-                value = value.float()
-            result[key] = value
-
-        return result
+        # Use shared encoder with batch dim for policy input
+        return self.policy._encode_obs(obs, wm, self.rollout_env.device, add_batch=True)
 
     def _to_env_action(self, action: TensorDict):
         '''Convert policy action tensors into real-env action dict.'''
