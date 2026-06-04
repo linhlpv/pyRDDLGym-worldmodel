@@ -48,9 +48,9 @@ def plot_rollouts(model):
 
 
 if __name__ == "__main__":
-    # create_pong_data()
+    create_pong_data()
     seq_len = 8
-    fit = False
+    fit = True
 
     if fit:
         train_loader, test_loader = get_dataloader(
