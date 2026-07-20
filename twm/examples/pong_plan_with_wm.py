@@ -1,12 +1,17 @@
 import numpy as np
-import torch
 import pyRDDLGym
 from pyRDDLGym.core.policy import BaseAgent
+import os
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+import torch
 
 from twm.core.data import create_data, get_dataloader, \
     plot_data_trajectories, plot_trajectories, save_video
 from twm.core.model import WorldModel, WorldModelEvaluator
+from twm.planners.plan_by_backprop import PlanByBackpropMPC
+from twm.planners.random_shooting import RandomShootingMPC
 from twm.core.spec import EnvSpec, FluentSpec
+from twm.trainner.offline_trainer import OfflineTrainer
 
 
 state_spec = {
@@ -97,22 +102,23 @@ def plot_rollouts(model, batch_size=4):
                  'paddle-y': state_dict['paddle-y'][0].item()}
         return env._visualizer.render(state)
     save_video(render_fn, trajectories, 'pong_model_rollout.gif')
-    
+
 
 if __name__ == "__main__":
-    create_pong_data()
+    offline_data_dir = 'pong_data.pkl'
+    create_pong_data(save_path=offline_data_dir)
+
+    real_env = pyRDDLGym.make("Pong_arcade", '0', vectorized=True)
+    planner_type = 'random_shooting'  # or 'plan_by_backprop'
     seq_len = 8
-    fit = True
-    
-    if fit:
-        train_loader, test_loader = get_dataloader(
-            'pong_data.pkl', seq_len, batch_size=1024, augment_starts=False)
-   
-        model = WorldModel(env_spec=env_spec, seq_len=seq_len).to('cuda')
-        model.fit(train_loader, lr=0.001, epochs=600, test_data_loader=test_loader, 
-                  model_name=f'pong_world_model_{seq_len}.pth')
-    
-    else:
-        model = WorldModel.load(f'pong_world_model_{seq_len}.pth').to('cuda')     
-        plot_rollouts(model)
-    
+    device = 'cuda'
+    world_model = WorldModel(env_spec=env_spec, seq_len=seq_len).to(device)
+    initial_state = {'ball-x': np.array([0.5]), 'ball-y': np.array([0.5]),
+                      'paddle-y': np.array([0.4])}
+    reward_fn = lambda s, a, ns: -ns['ball-x'][0]
+    offline_trainer = OfflineTrainer(world_model=world_model, real_env=real_env,
+                                     reward_fn=reward_fn, initial_state=initial_state,
+                                     planner_type=planner_type, offline_data_dir=offline_data_dir,
+                                     pretrained_wm_epoch=50, wm_batch_size=1024, wm_lr=0.001,
+                                     seq_len=seq_len, device=device)
+    offline_trainer.solve(plot_name='pong_random_shoot_trainer.gif', max_steps=200, episodes=1, save_frames=True)
