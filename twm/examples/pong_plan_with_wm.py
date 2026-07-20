@@ -2,7 +2,6 @@ import numpy as np
 import pyRDDLGym
 from pyRDDLGym.core.policy import BaseAgent
 import os
-os.environ["SDL_VIDEODRIVER"] = "dummy"
 import torch
 
 from twm.core.data import create_data, get_dataloader, \
@@ -11,8 +10,9 @@ from twm.core.model import WorldModel, WorldModelEvaluator
 from twm.planners.plan_by_backprop import PlanByBackpropMPC
 from twm.planners.random_shooting import RandomShootingMPC
 from twm.core.spec import EnvSpec, FluentSpec
-from twm.trainner.offline_trainer import OfflineTrainer
+from twm.trainer.offline_trainer import OfflineTrainer
 
+os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 state_spec = {
     'ball-x': FluentSpec(shape=(1,), prange='real'),

@@ -19,6 +19,7 @@ TensorDict = Dict[str, Tensor]
 
 PARENT_PATH = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 MODEL_PATH = os.path.join(PARENT_PATH, 'models')
+os.makedirs(MODEL_PATH, exist_ok=True)
 
 
 class EMA:
@@ -479,6 +480,57 @@ class WorldModel(nn.Module):
         return model
 
 
+# Lazy implementation of ensemble world model, for fast prototyping.
+class EnsembleWorldModel(nn.Module):
+    '''An ensemble of world models for uncertainty estimation.'''
+
+    def __init__(self, num_models: int, **kwargs) -> None:
+        super().__init__()
+        self.models = nn.ModuleList([WorldModel(**kwargs) for _ in range(num_models)])
+
+    def fit(self, train_data_loader, epochs: int, **kwargs) -> None:
+        '''Trains each model in the ensemble independently.'''
+        for i, model in enumerate(self.models):
+            print(f'Training model {i+1}/{len(self.models)}')
+            model.fit(train_data_loader, epochs, **kwargs)
+
+    def predict_next_state(self, states: TensorDict, actions: TensorDict, pad_lens: Tensor,
+                           return_latent: bool=False, decode_output: bool=False, 
+                           grad: bool=False, **output_kwargs) -> TensorDict:
+        '''Predicts the next state using each model in the ensemble and averages the results.'''
+        pred_members = {key: [] for key in self.env_spec.state_spec}
+        for model in self.models:
+            raw_pred = model.forward(states, actions, pad_lens, decode_output=False)
+            soft_pred = model.prepare_output(raw_pred, grad=True)
+            for key, value in soft_pred.items():
+                pred_members[key].append(value)
+        
+        mean, uncertainty = {},  {}
+        for key, values in pred_members.items():
+            stacked = torch.stack(values, dim=0) # (num_models, batch, *shape)
+            prange = self.env_spec.all_spec[key].prange
+
+            if prange == 'real':
+                means[key] = stacked.mean(dim=0)
+                uncertainty[key] = stacked.std(dim=0)
+                means[key] = means[key].float()
+            
+            elif prange in ('int', 'bool'):
+                # compute the uncertainty via BALD (Bayesian Active Learning by Disagreement) decomposition for categorical/Bernoulli spec as now the predictions are the distribution.
+                # prevent log(0) issues
+                probs = stacked.clamp_min(1e-6) # (K, batch, *shape, n_classes)
+                mean_probs = probs.mean(dim=0)
+                total_entropy = -(mean_probs * mean_probs.log()).sum(dim=-1)
+                expected_entropy = -(probs * probs.log()).sum(dim=-1).mean(dim=0)
+                means[key] = mean_probs
+                uncertainty[key] = (total_entropy - expected_entropy).clamp_min(0.0)
+            
+            elif prange == 'pixel':
+                raise NotImplementedError('Uncertainty estimation for pixel spec is not implemented.')
+
+        return means, uncertainty
+
+
 class WorldModelEvaluator:
     '''Context manager for performing rollouts with a world model.'''
 
@@ -605,3 +657,7 @@ class WorldModelEvaluator:
                 trajectories.setdefault(key, []).append(tensor)
                 
         return {k: torch.stack(vs, dim=1) for k, vs in trajectories.items()}
+
+
+
+    

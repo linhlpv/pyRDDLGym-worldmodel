@@ -1,12 +1,13 @@
 import numpy as np
 import pyRDDLGym
 import os
-os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 from twm.core.model import WorldModel
 from twm.core.env import WorldModelEnv
 from twm.planners.plan_by_backprop import PlanByBackpropMPC, SLP, DRP
 from twm.planners.random_shooting import RandomShootingMPC
+
+os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 def create_world_model_env():
     world_model = WorldModel.load('pong_world_model_8.pth').to('cuda')

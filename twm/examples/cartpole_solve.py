@@ -2,13 +2,14 @@ import numpy as np
 import pyRDDLGym
 from pathlib import Path
 import os
-os.environ["SDL_VIDEODRIVER"] = "dummy"
 import torch
 
 from twm.core.model import WorldModel
 from twm.core.env import WorldModelEnv
 from twm.planners.plan_by_backprop import PlanByBackpropMPC
 from twm.planners.random_shooting import ContinuousRandomShootingMPC
+
+os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
