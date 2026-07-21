@@ -91,6 +91,8 @@ def create_data(env: gym.Env, env_spec: EnvSpec, policy, episodes: int, max_step
         'dones':       np.array(dones),
         'spec':        env_spec,
     }
+    if not os.path.exists(DATA_PATH):
+        os.makedirs(DATA_PATH)
     with open(os.path.join(DATA_PATH, data_name), 'wb') as f:
         pickle.dump(data, f)
 

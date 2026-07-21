@@ -112,7 +112,7 @@ class RandomShootingMPC:
             self.frames.append(self.real_env.render())
         self._action_history.append(action)
         self._obs_history.append(obs)
-        return obs, reward, term, trunc, info
+        return obs, action, reward, term, trunc, info
 
     def run(self, plot_name: str, max_steps: int=200, episodes: int=1, 
             save_frames: bool=True) -> float:
@@ -218,4 +218,4 @@ class ContinuousRandomShootingMPC(RandomShootingMPC):
             self.frames.append(self.real_env.render())
         self._action_history.append(action)
         self._obs_history.append(obs)
-        return obs, reward, term, trunc, info
+        return obs, action, reward, term, trunc, info

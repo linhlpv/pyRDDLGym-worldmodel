@@ -6,8 +6,10 @@ import torch
 
 from twm.core.model import WorldModel
 from twm.core.env import WorldModelEnv
-from twm.planners.plan_by_backprop import PlanByBackpropMPC
+from twm.planners.plan_by_backprop import PlanByBackpropMPC, DRP, SLP
 from twm.planners.random_shooting import ContinuousRandomShootingMPC
+from pyRDDLGym_rl.core.agent import StableBaselinesAgent
+from pyRDDLGym_rl.core.env import SimplifiedActionRDDLEnv
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
@@ -41,7 +43,7 @@ def run_backprop_mpc_agent():
     rollout_env = create_world_model_env()
     eval_env = pyRDDLGym.make("CartPole_Continuous_gym", '0', vectorized=True)
     mpc = PlanByBackpropMPC(
-        rollout_env, eval_env, lookahead=40
+        rollout_env, eval_env, lookahead=40, policy=SLP()
     )
     mpc.run('cartpole_backprop_mpc.gif', save_frames=True, episodes=1)
 

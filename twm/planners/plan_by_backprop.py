@@ -1,3 +1,4 @@
+import copy
 import gymnasium as gym
 import numpy as np
 import os
@@ -400,12 +401,17 @@ class PlanByBackpropMPC:
     def step(self, save_frames: bool=True) -> Tuple:
         '''Take one step in the real environment using the optimized action.'''
         action = self._select_action()
-        obs, reward, term, trunc, info = self.real_env.step(action)
+        # Handle single-value float32 actions by converting to Python float for pyRDDLGym compatibility
+        act = copy.deepcopy(action)
+        for key, value in act.items():
+            if value.size == 1 and value.dtype == np.float32:
+                act[key] = float(value.reshape(()))
+        obs, reward, term, trunc, info = self.real_env.step(act)
         if save_frames:
             self.frames.append(self.real_env.render())
         self._action_history.append(action)
         self._obs_history.append(obs)
-        return obs, reward, term, trunc, info
+        return obs, action, reward, term, trunc, info
 
     def run(self, plot_name: str, max_steps: int=200, episodes: int=1,
             save_frames: bool=True) -> float:
@@ -415,12 +421,16 @@ class PlanByBackpropMPC:
             total = 0.0
             self.reset()
             for _ in (pbar := tqdm(range(max_steps), desc='Running PBP MPC')):
-                _, reward, term, trunc, _ = self.step(save_frames=save_frames)
+                _, _, reward, term, trunc, _ = self.step(save_frames=save_frames)
                 total += reward
                 if term or trunc:
                     break
                 pbar.set_postfix({'Cuml Return': f'{total:.3f}'})
             avg += total / episodes
+
+        # create the plots directory if it doesn't exist
+        if not os.path.exists(PLOTS_PATH):
+            os.makedirs(PLOTS_PATH)
 
         if save_frames:
             self.frames[0].save(
