@@ -122,7 +122,7 @@ class RandomShootingMPC:
             total = 0.0
             self.reset()
             for _ in (pbar := tqdm(range(max_steps), desc='Running MPC')):
-                _, reward, term, trunc, _ = self.step(save_frames=save_frames)
+                _, _, reward, term, trunc, _ = self.step(save_frames=save_frames)
                 total += reward
                 if term or trunc:
                     break

@@ -43,10 +43,10 @@ def run_backprop_mpc_agent():
     rollout_env = create_world_model_env()
     eval_env = pyRDDLGym.make("CartPole_Continuous_gym", '0', vectorized=True)
     mpc = PlanByBackpropMPC(
-        rollout_env, eval_env, lookahead=40, policy=SLP()
+        rollout_env, eval_env, lookahead=40,
     )
     mpc.run('cartpole_backprop_mpc.gif', save_frames=True, episodes=1)
 
 if __name__ == "__main__":
-    # run_random_shooting_agent()
-    run_backprop_mpc_agent()
+    run_random_shooting_agent()
+    # run_backprop_mpc_agent()
