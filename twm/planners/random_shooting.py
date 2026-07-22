@@ -1,11 +1,10 @@
 import gymnasium as gym
 import numpy as np
-import os
 import torch
 from tqdm import tqdm
 from typing import Tuple
 
-from twm.core.data import PLOTS_PATH
+from twm.core.data import save_gif
 from twm.core.env import DiscreteActionWrapper, WorldModelEnv
 
 
@@ -96,6 +95,11 @@ class RandomShootingMPC:
                 best_idx = idx
         return best_idx
 
+    @property
+    def last_obs(self):
+        '''The most recent observation returned by the real environment.'''
+        return self._obs_history[-1]
+
     def reset(self) -> None:
         '''Reset the real environment and clear history.'''
         obs, _ = self.real_env.reset()
@@ -129,14 +133,9 @@ class RandomShootingMPC:
                 pbar.set_postfix({'Cuml Return': f'{total:.3f}'})
             avg += total / episodes
 
-        if not os.path.exists(PLOTS_PATH):
-            os.makedirs(PLOTS_PATH)
-            
         if save_frames:
-            self.frames[0].save(
-                fp=os.path.join(PLOTS_PATH, plot_name),
-                format='GIF', append_images=self.frames[1:], save_all=True, duration=100)
-            
+            save_gif(self.frames, plot_name)
+
         return avg
 
 

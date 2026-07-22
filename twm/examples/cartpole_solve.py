@@ -1,17 +1,14 @@
+import os
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+
 import numpy as np
 import pyRDDLGym
-from pathlib import Path
-import os
 import torch
 
-from twm.core.model import WorldModel
 from twm.core.env import WorldModelEnv
-from twm.planners.plan_by_backprop import PlanByBackpropMPC, DRP, SLP
+from twm.core.model import WorldModel
+from twm.planners.plan_by_backprop import PlanByBackpropMPC
 from twm.planners.random_shooting import ContinuousRandomShootingMPC
-from pyRDDLGym_rl.core.agent import StableBaselinesAgent
-from pyRDDLGym_rl.core.env import SimplifiedActionRDDLEnv
-
-os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -39,6 +36,7 @@ def run_random_shooting_agent():
     )
     mpc.run('cartpole_random_shooting.gif', save_frames=True, episodes=1)
 
+
 def run_backprop_mpc_agent():
     rollout_env = create_world_model_env()
     eval_env = pyRDDLGym.make("CartPole_Continuous_gym", '0', vectorized=True)
@@ -46,6 +44,7 @@ def run_backprop_mpc_agent():
         rollout_env, eval_env, lookahead=40,
     )
     mpc.run('cartpole_backprop_mpc.gif', save_frames=True, episodes=1)
+
 
 if __name__ == "__main__":
     run_random_shooting_agent()

@@ -1,23 +1,16 @@
-import os
-from typing import Callable, Dict
+from typing import Callable
 
-import numpy as np
 import torch
 import pyRDDLGym
 from tqdm import tqdm
 
-from twm.core.data import get_dataloader, PLOTS_PATH, \
-    plot_data_trajectories, plot_trajectories, save_video
+from twm.core.data import get_dataloader, save_gif
 from twm.core.env import WorldModelEnv
-from twm.core.model import WorldModel, WorldModelEvaluator, EMA
+from twm.core.model import WorldModel, EMA
+from twm.core.types import ArrayDict, TensorDict
 from twm.planners.plan_by_backprop import PlanByBackpropMPC
 from twm.planners.random_shooting import RandomShootingMPC
-from twm.core.spec import EnvSpec, FluentSpec
 
-Tensor = torch.Tensor
-TensorDict = Dict[str, Tensor]
-Array = np.ndarray
-ArrayDict = Dict[str, Array]
 
 class OfflineTrainer:
     '''
@@ -26,8 +19,9 @@ class OfflineTrainer:
     def __init__(self, world_model: WorldModel, real_env: pyRDDLGym.RDDLEnv,
                  reward_fn: Callable, initial_state: ArrayDict | TensorDict,
                  planner_type: str='random_shooting', offline_data_dir: str='pong_data.pkl',
-                 pretrained_wm_epoch: int=50, wm_batch_size: int=1024, wm_lr: float=1e-3, lr_decay: float=0.9, wm_name: str='pong_world_model_8_offline.pth',
-                 seq_len: int=8, device: str='cuda') -> None:
+                 pretrained_wm_epoch: int=50, wm_batch_size: int=1024, wm_lr: float=1e-3,
+                 lr_decay: float=0.9, wm_name: str='pong_world_model_8_offline.pth',
+                 seq_len: int=8, max_steps: int=200, device: str='cuda') -> None:
         self.env_spec = world_model.env_spec
         self.world_model = world_model
         self.real_env = real_env
@@ -42,21 +36,26 @@ class OfflineTrainer:
         self.lr_decay = lr_decay
         self.wm_name = wm_name
         self.seq_len = seq_len
+        self.max_steps = max_steps
         self.device = device
 
         self.wm_optim = torch.optim.Adam(self.world_model.parameters(), lr=self.wm_lr)
         self.wm_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.wm_optim, factor=self.lr_decay, patience=10, min_lr=1e-5)
-        self.ema = EMA(self.world_model)
 
         # Pretrain the world model and create the planner
         self._pretrain_world_model()
-        self._create_planner(max_steps=max_steps)
+        self._create_planner(max_steps=self.max_steps)
 
-    def _pretrain_world_model(self, ) -> None:
+    def _pretrain_world_model(self) -> None:
         '''Pretrain the world model on the dataset.'''
         self.train_loader, self.test_loader = get_dataloader(
             self.offline_data_dir, seq_len=self.seq_len, batch_size=self.wm_batch_size, augment_starts=False)
         
+        self.world_model.set_dataset_stats(self.train_loader.dataset)
+
+        # the EMA must be built after the statistics are registered
+        self.ema = EMA(self.world_model)
+
         for epoch in range(self.pretrained_wm_epoch):
             self.world_model.train()
             # training loop
@@ -111,12 +110,7 @@ class OfflineTrainer:
                 pbar.set_postfix({'Cuml Return': f'{total:.3f}'})
             avg += total / episodes
 
-        if not os.path.exists(PLOTS_PATH):
-            os.makedirs(PLOTS_PATH)
-
         if save_frames:
-            self.planner.frames[0].save(
-                fp=os.path.join(PLOTS_PATH, plot_name),
-                format='GIF', append_images=self.planner.frames[1:], save_all=True, duration=100)
+            save_gif(self.planner.frames, plot_name)
 
         return avg

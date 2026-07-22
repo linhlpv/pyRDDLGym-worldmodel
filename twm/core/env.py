@@ -7,11 +7,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from twm.core.model import WorldModel, WorldModelEvaluator
 from twm.core.spec import FluentSpec
-
-Array = np.ndarray
-ArrayDict = Dict[str, Array]
-Tensor = torch.Tensor
-TensorDict = Dict[str, Tensor]
+from twm.core.types import ArrayDict, TensorDict
 
 
 class WorldModelEnv(gym.Env):
@@ -90,17 +86,24 @@ class WorldModelEnv(gym.Env):
 
     # <----------------------------------- sampling ----------------------------------->
     
+    @staticmethod
+    def _squash(obs: TensorDict) -> TensorDict:
+        '''Drops the singleton batch dimension of an observation.'''
+        return {key: value.squeeze(0) for key, value in obs.items()}
+
     def reset(self, *, seed: Optional[int]=None, options: Optional[Dict]=None) -> Tuple:
         '''Resets the environment with a new initial state.'''
         super().reset(seed=seed)
         self.rollout.reset(self.initial_state, self.initial_action)
-        self.obs = self.rollout.last_states(to_numpy=False, squash=True)
+
+        # the batched observation is kept internally, the caller sees it unbatched
+        self.obs = self.rollout.last_states()
         self.step_num = 0
-        return self.obs, {}
+        return self._squash(self.obs), {}
 
     def step(self, action: ArrayDict) -> Tuple:
         '''Performs one step in the environment.'''
-        action_torch = {k: torch.as_tensor(v)[None].to(self.device) 
+        action_torch = {k: torch.as_tensor(v)[None].to(self.device)
                         for k, v in action.items()}
         self.rollout.step(action_torch)
         next_obs = self.rollout.last_states()
@@ -108,7 +111,7 @@ class WorldModelEnv(gym.Env):
         self.obs = next_obs
         self.step_num += 1
         trunc = self.step_num >= self.max_steps
-        return self.obs, reward, False, trunc, {}
+        return self._squash(next_obs), reward, False, trunc, {}
 
     def render(self) -> None:
         '''Renders the environment (not implemented).'''

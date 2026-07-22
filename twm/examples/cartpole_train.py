@@ -107,7 +107,7 @@ def plot_rollouts(model, batch_size=4, max_steps=200):
         batch_size,
         'cartpole_data_rollouts.png',
     )
-    plot_trajectories(trajectories, 'cartpole_model_rollouts.png', plot_dir=RUN_DIR)
+    plot_trajectories(trajectories, 'cartpole_model_rollouts.png')
 
     def render_fn(state_dict):
         state = {
@@ -118,7 +118,7 @@ def plot_rollouts(model, batch_size=4, max_steps=200):
         }
         return env._visualizer.render(state)
 
-    save_video(render_fn, trajectories, 'cartpole_model_rollout.gif', plot_dir=RUN_DIR)
+    save_video(render_fn, trajectories, 'cartpole_model_rollout.gif')
 
 
 if __name__ == "__main__":
@@ -141,7 +141,5 @@ if __name__ == "__main__":
         )
 
     else:
-        model = WorldModel.load(
-            f'{MODEL_PREFIX}_{seq_len}.pth', model_dir=RUN_DIR
-        ).to('cuda')
+        model = WorldModel.load(f'{MODEL_PREFIX}_{seq_len}.pth').to('cuda')
         plot_rollouts(model)

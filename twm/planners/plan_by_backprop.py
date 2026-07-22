@@ -1,7 +1,6 @@
 import copy
 import gymnasium as gym
 import numpy as np
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,10 +8,9 @@ from tqdm import tqdm
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple
 
-from twm.core.data import PLOTS_PATH
+from twm.core.data import save_gif
 from twm.core.env import WorldModelEnv
-
-TensorDict = Dict[str, torch.Tensor]
+from twm.core.types import TensorDict
 
 
 class PolicyRepresentation(nn.Module, ABC):
@@ -391,6 +389,11 @@ class PlanByBackpropMPC:
             action = self.policy.action(self._latest_obs_tensor(), step=0)
         return self._to_env_action(action)
 
+    @property
+    def last_obs(self):
+        '''The most recent observation returned by the real environment.'''
+        return self._obs_history[-1]
+
     def reset(self) -> None:
         '''Reset the real environment and clear history.'''
         obs, _ = self.real_env.reset()
@@ -428,13 +431,7 @@ class PlanByBackpropMPC:
                 pbar.set_postfix({'Cuml Return': f'{total:.3f}'})
             avg += total / episodes
 
-        # create the plots directory if it doesn't exist
-        if not os.path.exists(PLOTS_PATH):
-            os.makedirs(PLOTS_PATH)
-
         if save_frames:
-            self.frames[0].save(
-                fp=os.path.join(PLOTS_PATH, plot_name),
-                format='GIF', append_images=self.frames[1:], save_all=True, duration=100)
+            save_gif(self.frames, plot_name)
 
         return avg

@@ -1,5 +1,3 @@
-import os
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,19 +5,12 @@ from tqdm import tqdm
 from typing import Any, cast, Dict, Optional, Tuple
 
 from twm.core.encoding import SinePositionalEncoding, RotaryTransformerEncoderLayer
+from twm.core.paths import model_file
 from twm.core.projection import (
     VectorEncoder, VectorDecoder, CategoricalDecoder, ImageEncoder, ImageDecoder
 )
 from twm.core.spec import EnvSpec
-
-Array = np.ndarray
-ArrayDict = Dict[str, Array]
-Tensor = torch.Tensor
-TensorDict = Dict[str, Tensor]
-
-PARENT_PATH = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-MODEL_PATH = os.path.join(PARENT_PATH, 'models')
-os.makedirs(MODEL_PATH, exist_ok=True)
+from twm.core.types import ArrayDict, Tensor, TensorDict
 
 
 class EMA:
@@ -210,6 +201,14 @@ class WorldModel(nn.Module):
         else:
             return tensor.float()
     
+    def normalizer_stats(self, key: str, ndim: int) -> Tuple[Tensor, Tensor]:
+        '''Returns the (mean, std) buffers of a key, broadcast against an ndim tensor.'''
+        mean = getattr(self, f'{key}_mean')
+        std = getattr(self, f'{key}_std')
+        mean = mean.view(*(1,) * (ndim - mean.ndim), *mean.shape)
+        std = std.view(*(1,) * (ndim - std.ndim), *std.shape)
+        return mean, std
+
     def prepare_inputs(self, inputs: TensorDict, grad: bool=False) -> TensorDict:
         '''Prepares inputs to feed to the transformer.'''
         result = {}
@@ -222,12 +221,9 @@ class WorldModel(nn.Module):
 
             # reals normalized with dataset stats
             elif spec.prange == 'real':
-                mean = getattr(self, f'{key}_mean')
-                std = getattr(self, f'{key}_std')
-                mean = mean.view(*(1,) * (tensor.ndim - mean.ndim), *mean.shape)
-                std = std.view(*(1,) * (tensor.ndim - std.ndim), *std.shape)
+                mean, std = self.normalizer_stats(key, tensor.ndim)
                 result[key] = (tensor.float() - mean) / std
-            
+
             # discrete converted to one-hot vectors
             elif spec.prange in ('int', 'bool'):
                 result[key] = tensor.float() if grad else self.one_hot(tensor, key)
@@ -313,10 +309,7 @@ class WorldModel(nn.Module):
 
             # model handles denormalization for real-valued states
             if self.all_spec[key].prange == 'real':
-                mean = getattr(self, f'{key}_mean')
-                std = getattr(self, f'{key}_std')
-                mean = mean.view(*(1,) * (value.ndim - mean.ndim), *mean.shape)
-                std = std.view(*(1,) * (value.ndim - std.ndim), *std.shape)
+                mean, std = self.normalizer_stats(key, value.ndim)
                 value = value.float() * std + mean
 
             result[key] = value
@@ -463,13 +456,13 @@ class WorldModel(nn.Module):
             'config': self._config(),
             'state_dict': self.state_dict(),
         }
-        torch.save(checkpoint, os.path.join(MODEL_PATH, model_name))
+        torch.save(checkpoint, model_file(model_name))
 
     @classmethod
     def load(cls, model_name: str, device: str='cuda') -> 'WorldModel':
         '''Loads a model from a file, reconstructing the architecture from the config.'''
         checkpoint = torch.load(
-            os.path.join(MODEL_PATH, model_name), map_location=device, weights_only=False)
+            model_file(model_name), map_location=device, weights_only=False)
         config = checkpoint['config']
         config['env_spec'] = EnvSpec.deserialize(config['env_spec'])
         state_dict = checkpoint['state_dict']
@@ -488,6 +481,11 @@ class EnsembleWorldModel(nn.Module):
         super().__init__()
         self.models = nn.ModuleList([WorldModel(**kwargs) for _ in range(num_models)])
 
+    @property
+    def env_spec(self) -> EnvSpec:
+        '''The environment spec, shared by every member of the ensemble.'''
+        return cast(WorldModel, self.models[0]).env_spec
+
     def fit(self, train_data_loader, epochs: int, **kwargs) -> None:
         '''Trains each model in the ensemble independently.'''
         for i, model in enumerate(self.models):
@@ -495,38 +493,41 @@ class EnsembleWorldModel(nn.Module):
             model.fit(train_data_loader, epochs, **kwargs)
 
     def predict_next_state(self, states: TensorDict, actions: TensorDict, pad_lens: Tensor,
-                           return_latent: bool=False, decode_output: bool=False, 
-                           grad: bool=False, **output_kwargs) -> TensorDict:
-        '''Predicts the next state using each model in the ensemble and averages the results.'''
-        pred_members = {key: [] for key in self.env_spec.state_spec}
+                           **output_kwargs) -> Tuple[TensorDict, TensorDict]:
+        '''Predicts the next state with every member and returns the ensemble mean
+        together with a per-key estimate of the epistemic uncertainty.'''
+        env_spec = self.env_spec
+        pred_members = {key: [] for key in env_spec.state_spec}
         for model in self.models:
             raw_pred = model.forward(states, actions, pad_lens, decode_output=False)
-            soft_pred = model.prepare_output(raw_pred, grad=True)
+
+            # decode in grad mode so that discrete keys stay distributions
+            soft_pred = model.prepare_outputs(raw_pred, grad=True, **output_kwargs)
             for key, value in soft_pred.items():
                 pred_members[key].append(value)
-        
-        mean, uncertainty = {},  {}
-        for key, values in pred_members.items():
-            stacked = torch.stack(values, dim=0) # (num_models, batch, *shape)
-            prange = self.env_spec.all_spec[key].prange
 
+        means, uncertainty = {}, {}
+        for key, values in pred_members.items():
+            stacked = torch.stack(values, dim=0)  # (num_models, batch, *shape)
+            prange = env_spec.all_spec[key].prange
+
+            # reals: the spread of the members is the uncertainty
             if prange == 'real':
-                means[key] = stacked.mean(dim=0)
+                means[key] = stacked.mean(dim=0).float()
                 uncertainty[key] = stacked.std(dim=0)
-                means[key] = means[key].float()
-            
+
+            # discrete: BALD decomposition, total minus expected entropy
             elif prange in ('int', 'bool'):
-                # compute the uncertainty via BALD (Bayesian Active Learning by Disagreement) decomposition for categorical/Bernoulli spec as now the predictions are the distribution.
-                # prevent log(0) issues
-                probs = stacked.clamp_min(1e-6) # (K, batch, *shape, n_classes)
+                probs = stacked.clamp_min(1e-6)  # (num_models, batch, *shape, n_classes)
                 mean_probs = probs.mean(dim=0)
                 total_entropy = -(mean_probs * mean_probs.log()).sum(dim=-1)
                 expected_entropy = -(probs * probs.log()).sum(dim=-1).mean(dim=0)
                 means[key] = mean_probs
                 uncertainty[key] = (total_entropy - expected_entropy).clamp_min(0.0)
-            
-            elif prange == 'pixel':
-                raise NotImplementedError('Uncertainty estimation for pixel spec is not implemented.')
+
+            else:
+                raise NotImplementedError(
+                    f'Uncertainty estimation is not implemented for prange {prange}.')
 
         return means, uncertainty
 
@@ -552,7 +553,7 @@ class WorldModelEvaluator:
     def reset(self, init_states: TensorDict, init_actions: Optional[TensorDict],
               grad: bool=False) -> None:
         '''Resets the rollout context with initial states and actions.'''
-        spec = self.model.env_spec
+        env_spec = self.model.env_spec
         
         # calculate initial padding lengths based on the length of the initial states
         self.batch, init_len = next(iter(init_states.values())).shape[:2]
@@ -564,14 +565,14 @@ class WorldModelEvaluator:
         self.states = {
             k: self.pad_with_zeros(
                 self.model.one_hot(init_states[k], k) if grad else init_states[k]) 
-            for k in spec.state_spec
+            for k in env_spec.state_spec
         }
 
         # pad initial actions to required sequence length and store in context buffer
         if init_actions is None:
             assert init_len == 1, 'Must pass single initial state.'
             self.actions = {}
-            for key, spec in spec.action_spec.items():
+            for key, spec in env_spec.action_spec.items():
                 if grad and spec.prange in ('int', 'bool'):
                     low, high = self.model.spec_bounds(key)
                     n_classes = high - low + 1
@@ -583,16 +584,16 @@ class WorldModelEvaluator:
             self.actions = {
                 k: self.pad_with_zeros(
                     self.model.one_hot(init_actions[k], k) if grad else init_actions[k])
-                for k in spec.action_spec
+                for k in env_spec.action_spec
             }
         
-    def index_of_last_epoch(self) -> int:
+    def last_real_index(self) -> int:
         '''Calculates the index into the last real state, accounting for padding.'''
         return max(self.seq_len - self.pad_len - 1, 0)
     
     def last_states(self, to_numpy: bool=False, squash: bool=False) -> ArrayDict | TensorDict:
         '''Extracts the last real states from the rollout context.'''
-        last_idx = self.index_of_last_epoch()
+        last_idx = self.last_real_index()
         result = {}
         for key, tensor in self.states.items():
             value = tensor[:, last_idx]
@@ -609,7 +610,7 @@ class WorldModelEvaluator:
         self.model.eval()
 
         # set actions at the last real token position for each batch item
-        last_idx = self.index_of_last_epoch()
+        last_idx = self.last_real_index()
         for key, tensor in actions.items():
             y = self.actions[key].clone()
             y[:, last_idx] = tensor
@@ -657,7 +658,3 @@ class WorldModelEvaluator:
                 trajectories.setdefault(key, []).append(tensor)
                 
         return {k: torch.stack(vs, dim=1) for k, vs in trajectories.items()}
-
-
-
-    

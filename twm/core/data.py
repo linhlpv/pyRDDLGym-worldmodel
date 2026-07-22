@@ -10,16 +10,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from typing import Any, Callable, Dict, Generator, List, Tuple
 
+from twm.core.paths import DATA_PATH, data_file, plot_file
 from twm.core.spec import EnvSpec
-
-Array = np.ndarray
-ArrayDict = Dict[str, Array]
-Tensor = torch.Tensor
-TensorDict = Dict[str, Tensor]
-
-PARENT_PATH = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-DATA_PATH = os.path.join(PARENT_PATH, 'data')
-PLOTS_PATH = os.path.join(PARENT_PATH, 'plots')
+from twm.core.types import Array, ArrayDict, Tensor, TensorDict
 
 
 # <------------------------------- Data collection  ------------------------------>
@@ -37,7 +30,8 @@ def _dict_append(src: Dict[str, Any], dest: Dict[str, List[Any]]) -> None:
         dest.setdefault(key, []).append(np.asarray(value))
 
 
-def _create_obs(state, env, env_spec, image_map):
+def _create_obs(state: ArrayDict, env: gym.Env, env_spec: EnvSpec,
+                image_map: Callable) -> ArrayDict:
     '''Creates an observation dict from the environment state.'''
     obs = {}
     for key, spec in env_spec.state_spec.items():
@@ -89,11 +83,9 @@ def create_data(env: gym.Env, env_spec: EnvSpec, policy, episodes: int, max_step
         'next_states': {k: np.asarray(v) for k, v in next_states.items()},
         'rewards':     np.array(rewards),
         'dones':       np.array(dones),
-        'spec':        env_spec,
+        'spec':        env_spec.serialize(),
     }
-    if not os.path.exists(DATA_PATH):
-        os.makedirs(DATA_PATH)
-    with open(os.path.join(DATA_PATH, data_name), 'wb') as f:
+    with open(data_file(data_name), 'wb') as f:
         pickle.dump(data, f)
 
 
@@ -104,10 +96,13 @@ def load_episodic_data(data_name: str) -> Generator[Dict[str, Any], None, None]:
     with open(os.path.join(DATA_PATH, data_name), 'rb') as f:
         data = pickle.load(f)
 
+    # accepts both serialized specs and (legacy) pickled EnvSpec objects
+    env_spec = EnvSpec.deserialize(data['spec'])
+
     # find episode boundaries based on termination flags
     ep_ends = np.where(data['dones'])[0] + 1
     ep_starts = np.concatenate([[0], ep_ends[:-1]])
-    
+
     # split data into episodes and yield as dicts
     for start, end in zip(ep_starts, ep_ends):
         dones_ep = data['dones'][start:end]  
@@ -119,7 +114,7 @@ def load_episodic_data(data_name: str) -> Generator[Dict[str, Any], None, None]:
             'rewards':     data['rewards'][start:end],
             'dones':       dones_ep,
             'len':         end - start,
-            'spec':        data['spec'],
+            'spec':        env_spec,
         }
 
 
@@ -127,15 +122,18 @@ class SequenceDataset(torch.utils.data.Dataset):
     '''A PyTorch Dataset that takes episodic data and returns padded sequences of a 
     specified length.'''
     
-    def __init__(self, episodes: List[Dict[str, Any]], seq_len: int, 
-                 augment_starts: bool=False, min_frames: int=2) -> None:
+    def __init__(self, episodes: List[Dict[str, Any]], seq_len: int,
+                 augment_starts: bool=False, min_frames: int=2,
+                 normalizer_stats: Dict[str, Tuple[Tensor, Tensor]] | None=None) -> None:
         self.seq_len = seq_len
         self.augment_starts = augment_starts
         self.min_frames = max(1, int(min_frames))
         self.env_spec = episodes[0]['spec']
-              
+
         self._episodes, self._index = self.make_episode_index(episodes)
-        self.normalizer_stats = self.init_stats(self._episodes)
+        # held-out sets are normalized with the statistics of the training set
+        self.normalizer_stats = (self.init_stats(self._episodes)
+                                 if normalizer_stats is None else normalizer_stats)
 
     # <------------------------------- Data preparation  ------------------------------>
 
@@ -198,8 +196,7 @@ class SequenceDataset(torch.utils.data.Dataset):
         '''Returns a padded sequence sample from the dataset at the given index.'''
         ep_idx, t = self._index[idx]
         ep = self._episodes[ep_idx]
-        T = self.seq_len
-        
+
         # get padded sequences of states, actions, rewards, dones, and next_states
         states      = {k: self.make_padded(v, t)[0] for k, v in ep['states'].items()}
         actions     = {k: self.make_padded(v, t)[0] for k, v in ep['actions'].items()}            
@@ -233,7 +230,69 @@ class SequenceDataset(torch.utils.data.Dataset):
         }
     
 
-def get_dataloader(data_name: str, seq_len: int, batch_size: int=64, 
+class EpisodeBuffer:
+    '''Collects transitions online and exposes them as episodes.
+
+    Episodes are stored in the layout produced by ``load_episodic_data``, so that
+    they can be handed straight to ``SequenceDataset``.
+    '''
+
+    def __init__(self, env_spec: EnvSpec, episodes: List[Dict[str, Any]] | None=None,
+                 capacity: int | None=None) -> None:
+        self.env_spec = env_spec
+        self.capacity = capacity
+        self.episodes = [] if episodes is None else list(episodes)
+        self._clear_current()
+
+    def _clear_current(self) -> None:
+        '''Discards the partially collected episode.'''
+        self._states, self._actions, self._next_states = {}, {}, {}
+        self._rewards, self._dones = [], []
+
+    def add_transition(self, obs: ArrayDict, action: ArrayDict, reward: float,
+                       next_obs: ArrayDict, done: bool) -> None:
+        '''Appends a transition to the episode currently being collected.'''
+        _dict_append({k: obs[k] for k in self.env_spec.state_spec}, self._states)
+        _dict_append({k: action[k] for k in self.env_spec.action_spec}, self._actions)
+        _dict_append({k: next_obs[k] for k in self.env_spec.state_spec}, self._next_states)
+        self._rewards.append(float(reward))
+        self._dones.append(bool(done))
+
+    def end_episode(self) -> None:
+        '''Closes the episode being collected and appends it to the buffer.'''
+        if not self._rewards:
+            return
+
+        # episodes are always terminal at their last step, even when truncated
+        self._dones[-1] = True
+        self.episodes.append({
+            'states':      {k: np.asarray(v) for k, v in self._states.items()},
+            'actions':     {k: np.asarray(v) for k, v in self._actions.items()},
+            'next_states': {k: np.asarray(v) for k, v in self._next_states.items()},
+            'rewards':     np.asarray(self._rewards),
+            'dones':       np.asarray(self._dones),
+            'len':         len(self._rewards),
+            'spec':        self.env_spec,
+        })
+        self._clear_current()
+
+        # drop the oldest episodes once the buffer is full
+        if self.capacity is not None and len(self.episodes) > self.capacity:
+            del self.episodes[:len(self.episodes) - self.capacity]
+
+    def __len__(self) -> int:
+        '''Returns the number of completed episodes in the buffer.'''
+        return len(self.episodes)
+
+
+def make_dataloader(episodes: List[Dict[str, Any]], seq_len: int, batch_size: int=64,
+                    shuffle: bool=True, **dataset_kwargs) -> DataLoader:
+    '''Creates a DataLoader over in-memory episodes.'''
+    dataset = SequenceDataset(episodes, seq_len, **dataset_kwargs)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, pin_memory=True)
+
+
+def get_dataloader(data_name: str, seq_len: int, batch_size: int=64,
                    test_split: float=0.1, seed: int=0, **dataset_kwargs
                    ) -> Tuple[DataLoader, DataLoader]:
     '''Loads episodic data from a file, splits into train/test sets.'''
@@ -250,11 +309,11 @@ def get_dataloader(data_name: str, seq_len: int, batch_size: int=64,
 
     # create PyTorch Datasets and DataLoaders
     train_set = SequenceDataset(train_eps, seq_len, **dataset_kwargs)
-    test_set = SequenceDataset(test_eps, seq_len, **dataset_kwargs)
+    test_set = SequenceDataset(test_eps, seq_len,
+                               normalizer_stats=train_set.normalizer_stats, **dataset_kwargs)
 
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, pin_memory=True)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, pin_memory=True)
-
     return train_loader, test_loader
 
 
@@ -279,7 +338,7 @@ def plot_trajectories(trajectories: List[TensorDict], plot_name: str) -> None:
                 axs[idx].plot(value[:, j])
                 idx += 1
 
-    plt.savefig(os.path.join(PLOTS_PATH, plot_name))
+    plt.savefig(plot_file(plot_name))
     plt.close(fig)
 
 
@@ -289,6 +348,16 @@ def plot_data_trajectories(data_name: str, limit: int, plot_name: str) -> None:
     random.shuffle(episode_data)
     trajectories = [episode_data[i]['states'] for i in range(limit)]
     plot_trajectories(trajectories, plot_name)
+
+
+def save_gif(frames: List[Image.Image], plot_name: str, duration: int=100) -> None:
+    '''Saves a sequence of PIL frames as an animated GIF in the plots directory.'''
+    if not frames:
+        raise ValueError('cannot save a GIF without any frames')
+    frames[0].save(
+        fp=plot_file(plot_name),
+        format='GIF', append_images=frames[1:], save_all=True, duration=duration
+    )
 
 
 def save_video(render_fn: Callable, trajectories: List[TensorDict], plot_name: str) -> None:
@@ -305,8 +374,5 @@ def save_video(render_fn: Callable, trajectories: List[TensorDict], plot_name: s
         for i in range(n_steps):
             state = {k: v[i] for k, v in trajectory_np.items()}
             frames.append(render_fn(state))
-    
-    frames[0].save(
-        fp=os.path.join(PLOTS_PATH, plot_name), 
-        format='GIF', append_images=frames, save_all=True, duration=100
-    )
+
+    save_gif(frames, plot_name)

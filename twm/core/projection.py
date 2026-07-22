@@ -5,10 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 
-Tensor = torch.Tensor
-TensorDict = Dict[str, Tensor]
-Shape = Tuple[int, ...]
-
+from twm.core.types import Shape, Tensor, TensorDict
 
 # <------------------------------- Vector In and Out  ------------------------------>
 
