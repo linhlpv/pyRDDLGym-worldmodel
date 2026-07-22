@@ -304,7 +304,7 @@ class PlanByBackpropMPC:
         init_actions = {}
         for key, spec in env_spec.action_spec.items():
             if act_hist:
-                acts = np.stack([np.asarray(a[key]) for a in act_hist], axis=0)
+                acts = np.stack([np.asarray(a[key]).reshape(spec.shape) for a in act_hist], axis=0)
             else:
                 acts = np.zeros((0, *spec.shape))
             zero_pad = np.zeros((1, *spec.shape))
@@ -356,6 +356,22 @@ class PlanByBackpropMPC:
             result[key] = value.item() if np.asarray(value).shape == () else value
         return result
 
+    def _to_real_env_action(self, action) -> Dict[str, Any]:
+        '''Convert canonical actions to the representation expected by pyRDDLGym.'''
+        result = {}
+
+        for key, value in action.items():
+            spec = self.rollout_env.world_model.env_spec.action_spec[key]
+            array = np.asarray(value)
+
+            # pyRDDLGym expects single real actions as Python floats
+            if spec.prange == 'real' and array.size == 1:
+                result[key] = float(array.reshape(()))
+            else:
+                result[key] = value
+            
+        return result
+
     def _select_action(self):
         '''Optimize policy representation and return the first executable action.'''
         horizon = min(self.lookahead, self.rollout_env.max_steps)
@@ -404,14 +420,11 @@ class PlanByBackpropMPC:
     def step(self, save_frames: bool=True) -> Tuple:
         '''Take one step in the real environment using the optimized action.'''
         action = self._select_action()
-        # Handle single-value float32 actions by converting to Python float for pyRDDLGym compatibility
-        act = copy.deepcopy(action)
-        for key, value in act.items():
-            if value.size == 1 and value.dtype == np.float32:
-                act[key] = float(value.reshape(()))
-        obs, reward, term, trunc, info = self.real_env.step(act)
+        env_action = self._to_real_env_action(action)
+        obs, reward, term, trunc, info = self.real_env.step(env_action)
         if save_frames:
             self.frames.append(self.real_env.render())
+        # Store the canonical action, not the converted environment action
         self._action_history.append(action)
         self._obs_history.append(obs)
         return obs, action, reward, term, trunc, info

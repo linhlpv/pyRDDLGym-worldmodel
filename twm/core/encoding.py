@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
 
-Tensor = torch.Tensor
+from twm.core.types import Tensor
 
 
 class SinePositionalEncoding(nn.Module):

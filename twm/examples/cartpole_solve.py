@@ -47,5 +47,5 @@ def run_backprop_mpc_agent():
 
 
 if __name__ == "__main__":
-    run_random_shooting_agent()
-    # run_backprop_mpc_agent()
+    # run_random_shooting_agent()
+    run_backprop_mpc_agent()
