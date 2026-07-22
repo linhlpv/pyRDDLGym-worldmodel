@@ -60,8 +60,9 @@ class OnlineTrainer(OfflineTrainer):
             self.planner.reset()
             for _ in (pbar := tqdm(range(max_steps), desc='Running MPC')):
                 obs = self.planner.last_obs
-                next_obs, action, reward, term, trunc, _ = self.planner.step(
+                next_obs, reward, term, trunc, _ = self.planner.step(
                     save_frames=save_frames)
+                action = self.planner.last_action
                 total += reward
                 self.buffer.add_transition(obs, action, reward, next_obs, term or trunc)
                 if term or trunc:

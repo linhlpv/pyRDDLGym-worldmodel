@@ -7,7 +7,7 @@ import torch
 
 Array = np.ndarray
 ArrayDict = Dict[str, Array]
-Shape = tuple[int, ...]
+Shape = Tuple[int, ...]
 Tensor = torch.Tensor
 TensorDict = Dict[str, Tensor]
 

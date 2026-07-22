@@ -100,6 +100,13 @@ class RandomShootingMPC:
         '''The most recent observation returned by the real environment.'''
         return self._obs_history[-1]
 
+    @property
+    def last_action(self):
+        '''The most recently executed canonical action.'''
+        if not self._action_history:
+            raise RuntimeError('No action has been executed since reset.')
+        return self._action_history[-1]
+
     def reset(self) -> None:
         '''Reset the real environment and clear history.'''
         obs, _ = self.real_env.reset()
@@ -116,7 +123,7 @@ class RandomShootingMPC:
             self.frames.append(self.real_env.render())
         self._action_history.append(action)
         self._obs_history.append(obs)
-        return obs, action, reward, term, trunc, info
+        return obs, reward, term, trunc, info
 
     def run(self, plot_name: str, max_steps: int=200, episodes: int=1, 
             save_frames: bool=True) -> float:
@@ -126,7 +133,7 @@ class RandomShootingMPC:
             total = 0.0
             self.reset()
             for _ in (pbar := tqdm(range(max_steps), desc='Running MPC')):
-                _, _, reward, term, trunc, _ = self.step(save_frames=save_frames)
+                _, reward, term, trunc, _ = self.step(save_frames=save_frames)
                 total += reward
                 if term or trunc:
                     break
@@ -217,4 +224,4 @@ class ContinuousRandomShootingMPC(RandomShootingMPC):
             self.frames.append(self.real_env.render())
         self._action_history.append(action)
         self._obs_history.append(obs)
-        return obs, action, reward, term, trunc, info
+        return obs, reward, term, trunc, info
