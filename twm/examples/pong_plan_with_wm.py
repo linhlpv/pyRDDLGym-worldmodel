@@ -23,7 +23,8 @@ if __name__ == "__main__":
     reward_fn = lambda s, a, ns: -ns['ball-x'][0]
     offline_trainer = OfflineTrainer(world_model=world_model, real_env=real_env,
                                      reward_fn=reward_fn, initial_state=initial_state,
-                                     planner_type=planner_type, offline_data_dir=offline_data_dir,
-                                     pretrained_wm_epoch=50, wm_batch_size=1024, wm_lr=0.001,
-                                     seq_len=seq_len, device=device)
+                                     planner_type=planner_type, max_steps=200)
+    offline_trainer.pretrain_world_model(
+        data_name=offline_data_dir, epochs=50, batch_size=1024, lr=0.001,
+        model_name='pong_world_model_8_offline.pth')
     offline_trainer.solve(plot_name='pong_random_shoot_trainer.gif', max_steps=200, episodes=1, save_frames=True)

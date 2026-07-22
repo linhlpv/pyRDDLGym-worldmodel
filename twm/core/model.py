@@ -392,7 +392,7 @@ class WorldModel(nn.Module):
     def fit(self, train_data_loader, epochs: int, 
             optimizer=torch.optim.Adam, lr: float=1e-3, lr_decay: float=0.9, 
             test_data_loader=None, model_name: str='') -> None:
-        '''Trains the world model, optionally evaluating on a test dataset.'''      
+        '''Convenience training API retained for standalone examples.'''
         device = self.device  
         self.set_dataset_stats(train_data_loader.dataset)
 
